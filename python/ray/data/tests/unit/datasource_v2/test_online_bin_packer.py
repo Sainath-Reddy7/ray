@@ -126,6 +126,43 @@ def test_packer_covers_every_unit_exactly_once(split_coalesced: bool) -> None:
     assert len(pairs) == len(set(pairs))  # no duplicates
 
 
+def _rows(manifest: FileManifest) -> list[tuple[str, Optional[list[int]]]]:
+    """A manifest's rows as ``(path, sorted unit ids)``; ``None`` = whole file."""
+    return [
+        (str(path), None if meta is None else sorted(meta["unit_ids"]))
+        for path, meta in zip(manifest.paths, manifest.file_chunk_metadatas)
+    ]
+
+
+def test_duplicated_file_keeps_one_row_per_copy() -> None:
+    # The same path listed twice (``read_parquet([p, p])``): both copies land
+    # in one bin, but their runs overlap, so the bin keeps one row per copy
+    # instead of unioning them into one — the reader scans each row, so no
+    # copy is silently dropped.
+    packer = OnlineBinPacker(max_bin_bytes=1000)
+    packer.add_input(_units("a", [10, 10]))
+    packer.add_input(_units("a", [10, 10]))
+    packer.finalize()
+
+    manifest = packer.next_partition()
+    assert not packer.has_partition()
+    assert _rows(manifest) == [("a", [0, 1]), ("a", [0, 1])]
+
+
+@pytest.mark.parametrize("split_coalesced", [False, True])
+def test_packer_preserves_unit_multiplicity_of_duplicated_files(
+    split_coalesced: bool,
+) -> None:
+    # A file listed k times must have every unit id covered exactly k times
+    # across all bins, whatever the bin layout.
+    files = [_units("a", [30] * 4)] * 3 + [_units("b", [30] * 3)] * 2
+    pairs = _pairs(_pack(files, max_bin_bytes=100, split_coalesced=split_coalesced))
+    expected = sorted(
+        [("a", i) for i in range(4)] * 3 + [("b", i) for i in range(3)] * 2
+    )
+    assert pairs == expected
+
+
 def test_split_coalesced_is_noop_without_coalescing() -> None:
     # With every run a single unit, the split flag must not change the packing.
     files = [_units("a", [40] * 3), _units("b", [40] * 2)]
